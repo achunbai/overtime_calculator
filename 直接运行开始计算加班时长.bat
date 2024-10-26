@@ -1,0 +1,3 @@
+@echo Running the Python script...
+@python calculator.py
+@pause

@@ -1,0 +1,5 @@
+requests
+beautifulsoup4
+tabulate
+selenium
+webdriver_manager
