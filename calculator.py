@@ -525,16 +525,16 @@ def fetch_cookie_via_browser(browser='auto'):
     driver = webdriver.Chrome(service=service, options=options) if browser == 'chrome' else webdriver.Edge(service=service, options=options)
     driver.get("https://hr.quectel.com")
 
-    print("请在打开的浏览器中登录网站...")
-    input("登录完成后按回车继续...")
+    print("请在打开的浏览器中登录网站，获取到了Cookie会自动退出...")
 
-    # 确保浏览器窗口保持打开状态
-    try:
-        cookies = driver.get_cookies()
-    except Exception as e:
-        print(f"获取Cookie时出错: {e}")
-        driver.quit()
-        return None
+    cookies = None
+    while not cookies:
+        try:
+            cookies = driver.get_cookies()
+        except Exception as e:
+            print(f"获取Cookie时出错: {e}")
+            driver.quit()
+            return None
 
     driver.quit()
 
@@ -1111,7 +1111,7 @@ if __name__ == '__main__':
     # 如果配置文件不存在或者配置文件中的接口地址为空，则需要重新获取
     if not cookie:
         print("未找到Cookie，正在启动浏览器以获取Cookie...")
-        cookie = fetch_cookie_via_browser(args.broswer)
+        cookie = fetch_cookie_via_browser(getattr(args, 'browser', ''))
         if cookie:
             save_cookie(cookie)
         else:
@@ -1137,14 +1137,31 @@ if __name__ == '__main__':
 
     # 检查返回的 JSON 数据中是否包含 'expired' 或 'No access' 字段
     def check_and_refresh_data(data, fetch_function, *args):
-        if 'expired' in data or 'No access' in data:
-            print("Cookie已过期或接口API已失效，正在重新获取...")
-            cookie = fetch_cookie_via_browser(args.broswer)
+        if 'expired' in data:
+            print("Cookie已过期，正在重新获取...")
+            cookie = fetch_cookie_via_browser(getattr(args, 'browser', ''))
+            print(f"cookie = {cookie}")
             if cookie:
                 save_cookie(cookie)
                 return fetch_function(*args)
             else:
                 print("Cookie获取失败，请重试")
+                exit()
+        elif 'No access' in data:
+            print("API接口已过期，正在重新获取...")
+            clock_in_api_endpoint = get_clock_in_api_endpoint_online(cookie)
+            if clock_in_api_endpoint:
+                save_clock_in_api_endpoint_to_config(clock_in_api_endpoint)
+                return fetch_function(*args)
+            else:
+                print("打卡数据接口获取失败，请重试")
+                exit()
+            process_application_api_endpoint = get_process_application_api_endpoint_online(cookie)
+            if process_application_api_endpoint:
+                save_process_application_api_endpoint_to_config(process_application_api_endpoint)
+                return fetch_function(*args)
+            else:
+                print("流程申请数据接口获取失败，请重试")
                 exit()
         return data
 
