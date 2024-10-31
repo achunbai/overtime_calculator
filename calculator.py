@@ -2,16 +2,10 @@
 # 适用于 深圳佛山桂林
 # 评价部分从之前的html中移植，如有冒犯 雨我无瓜
 # -*- coding: utf-8 -*-
-import csv
-import os
-import json
-import requests
-import argparse
-import shutil
-import platform
+import csv, os, json, time, shutil, requests, argparse, platform
 from bs4 import BeautifulSoup
 from typing import Dict, Set, Tuple, List, Optional
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 from tabulate import tabulate
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -23,21 +17,26 @@ from webdriver_manager.microsoft import EdgeChromiumDriverManager
 
 
 # 定义路径前缀
-CONFIG_PATH = 'config/'
-OUTPUT_PATH = 'output/'
+CONFIG_PATH     = 'config/'
+OUTPUT_PATH     = 'output/'
 LOCAL_DATA_PATH = 'data/'
 
 
 # 这里设置Cookie和配置文件路径
-COOKIES_FILE = CONFIG_PATH + 'cookies.json'
-CONFIG_FILE = CONFIG_PATH + 'config.json'
+COOKIES_FILE    = CONFIG_PATH + 'cookies.json'
+CONFIG_FILE     = CONFIG_PATH + 'config.json'
 
 
 # 请求头信息
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
-HOST = 'hr.quectel.com'
-ORIGIN = 'https://hr.quectel.com'
-REFERER = 'https://hr.quectel.com/portal/index'
+USER_AGENT  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
+HOST        = 'hr.quectel.com'
+ORIGIN      = 'https://hr.quectel.com'
+REFERER     = 'https://hr.quectel.com/portal/index'
+
+
+# 需要从页面获取的标题
+CLOCK_IN_DATA_TITLE             = '个人考勤查询'
+PROCESS_APPLICATION_DATA_TITLE  = '流程申请'
 
 
 # 本地文件操作
@@ -228,58 +227,45 @@ def get_holiday_data_online(records: json) -> Tuple[Dict, Set]:
                     workdays.add(info['date'])
     return holidays, workdays
 
-def get_clock_in_api_endpoint_online(user_cookie):
+def get_user_variable_online(user_cookie, title):
     """
-    从用户的 Cookie 信息中获取个人打卡查询的用户变量。
+    从用户的 Cookie 信息中获取指定标题的用户变量。
+
+    参数：
+        user_cookie：用户的 Cookie 信息，用于身份验证。
+        title：链接的标题，例如 '个人考勤查询' 或 '流程申请'。
+
+    返回值：
+        指定标题的用户变量。
+    """
+    # 如果 user_cookie 是字符串，则将其转换为字典
+    if isinstance(user_cookie, str):
+        user_cookie = dict(item.strip().split("=", 1) for item in user_cookie.split(";"))
+
+    session = requests.Session()
+    session.headers.update({
+        'Host': HOST,
+        'Origin': ORIGIN,
+        'Referer': REFERER,
+        'User-Agent': USER_AGENT,
+    })
+    # 直接更新会话的 Cookie
+    session.cookies.update(user_cookie)
+
+    url = "https://hr.quectel.com/portal/index"
+    response = session.get(url)
+
+    if response.status_code != 200:
+        raise ValueError(f"请求失败: {response.status_code}")
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+    link = soup.find('a', {'title': title})
+
+    if link is None:
+        print(f"response = {response.text}")
+        print(f"link = {link}")
+        raise ValueError(f"未找到标题为 '{title}' 的链接")
     
-    参数：
-        user_cookie：用户的 Cookie 信息，用于身份验证。
-
-    返回值：
-        个人打卡查询的用户变量。    
-    """
-    user_cookie = str(user_cookie)  # 强制转换为字符串
-    url = "https://hr.quectel.com/"
-    headers = {
-        'Host': HOST,
-        'Origin': ORIGIN,
-        'Referer': REFERER,
-        'User-Agent': USER_AGENT,
-        'Cookie': user_cookie
-    }
-    response = requests.request("GET", url, headers=headers)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    link = soup.find('a', {'title': '个人考勤查询'})
-    if link is None:
-        raise ValueError("未找到个人考勤查询链接")
-    href = link['href']
-    user_variable = href[href.index('!')+1:]
-    return user_variable
-
-def get_process_application_api_endpoint_online(user_cookie):
-    """
-    从用户的 Cookie 信息中获取个人流程申请的用户变量。
-
-    参数：
-        user_cookie：用户的 Cookie 信息，用于身份验证。
-
-    返回值：
-        个人流程申请的用户变量。    
-    """
-    user_cookie = str(user_cookie)  # 强制转换为字符串
-    url = "https://hr.quectel.com/"
-    headers = {
-        'Host': HOST,
-        'Origin': ORIGIN,
-        'Referer': REFERER,
-        'User-Agent': USER_AGENT,
-        'Cookie': user_cookie
-    }
-    response = requests.request("GET", url, headers=headers)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    link = soup.find('a', {'title': '流程申请'})
-    if link is None:
-        raise ValueError("未找到个人流程申请查询链接")
     href = link['href']
     user_variable = href[href.index('!')+1:]
     return user_variable
@@ -459,6 +445,36 @@ def get_delay_deduction_data(auth_key, user_cookie):
 
 
 # 浏览器操作
+def validate_user_cookie(user_cookie):
+    """
+    验证用户的 Cookie 是否包含所有必需的字段。
+
+    参数：
+        user_cookie：用户的 Cookie 字符串。
+
+    返回值：
+        如果包含所有必需字段，返回 True；否则返回 False。
+    """
+    required_fields = [
+        'quectel_lang',
+        'quectel_token',
+        'quectel_refresh_token',
+        'quectel_user_info',
+        'MCLGID',
+        'MCHRID',
+        'ENMAME',
+        'EMPTYPE'
+    ]
+
+    # 将 Cookie 字符串转换为字典
+    cookie_dict = dict(item.strip().split("=") for item in user_cookie.split(";"))
+
+    # 检查是否包含所有必需字段
+    for field in required_fields:
+        if field not in cookie_dict:
+            return False
+    return True
+
 def fetch_cookie_via_browser(browser='auto'):
     """
     启动浏览器获取 Cookie 并返回。
@@ -470,8 +486,8 @@ def fetch_cookie_via_browser(browser='auto'):
         str: 获取到的 Cookie 字符串，如果成功；否则返回 None。
     """
     if browser == 'auto':
-        # 自动检测 Chrome 浏览器是否存在
-        print(f"您的系统为{platform.system()}，正在检测 Chrome 或 Edge 浏览器是否安装...")
+        # 自动检测 Chrome 或 Edge 浏览器是否存在
+        print(f"您的系统为 {platform.system()}，正在检测 Chrome 或 Edge 浏览器是否安装...")
         chrome_path = None
         if platform.system() == 'Windows':
             system_drive = os.getenv('SystemDrive', 'C:')
@@ -495,7 +511,7 @@ def fetch_cookie_via_browser(browser='auto'):
             elif os.path.exists("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"):
                 browser = 'edge'
             else:
-                print("未找到 Chrome 或 Edge 浏览器，请至少安装其中一种浏览器, MacOS中Safari经过测试不可用, 需要关闭自动化才可以与页面进行交互。")
+                print("未找到 Chrome 或 Edge 浏览器，请至少安装其中一种浏览器。")
                 exit()
         else:
             print("未知的操作系统。")
@@ -508,18 +524,9 @@ def fetch_cookie_via_browser(browser='auto'):
         options = ChromeOptions()
         service = ChromeService(ChromeDriverManager().install())
 
-        # 添加 Chrome 选项
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--remote-debugging-port=9222")
-        options.add_argument("--disable-infobars")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-browser-side-navigation")
-        options.add_argument("--disable-software-rasterizer")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option('useAutomationExtension', False)
+    # 添加必要的浏览器选项
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
 
     print(f"正在启动{browser}浏览器以获取Cookie...")
     driver = webdriver.Chrome(service=service, options=options) if browser == 'chrome' else webdriver.Edge(service=service, options=options)
@@ -527,19 +534,17 @@ def fetch_cookie_via_browser(browser='auto'):
 
     print("请在打开的浏览器中登录网站，获取到了Cookie会自动退出...")
 
-    cookies = None
-    while not cookies:
+    while True:
         try:
             cookies = driver.get_cookies()
+            cookie_str = "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
+            if validate_user_cookie(cookie_str):
+                driver.quit()
+                return cookie_str
         except Exception as e:
             print(f"获取Cookie时出错: {e}")
-            driver.quit()
-            return None
-
-    driver.quit()
-
-    cookie_str = "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
-    return cookie_str
+            # 不关闭浏览器，继续等待用户登录
+        time.sleep(1)  # 等待一秒后重新检查
 
 
 # 逻辑部分
@@ -1121,13 +1126,13 @@ if __name__ == '__main__':
     # 如果配置文件中的打卡数据接口为空，则需要重新获取
     if not clock_in_api_endpoint:
         print("未找到打卡数据接口，正在获取...")
-        clock_in_api_endpoint = get_clock_in_api_endpoint_online(cookie)
+        clock_in_api_endpoint = get_user_variable_online(cookie, CLOCK_IN_DATA_TITLE)
         save_clock_in_api_endpoint_to_config(clock_in_api_endpoint)
     
     # 如果配置文件中的流程申请数据接口为空，则需要重新获取
     if not process_application_api_endpoint:
         print("未找到流程申请数据接口，正在获取...")
-        process_application_api_endpoint = get_process_application_api_endpoint_online(cookie)
+        process_application_api_endpoint = get_user_variable_online(cookie, PROCESS_APPLICATION_DATA_TITLE)
         save_process_application_api_endpoint_to_config(process_application_api_endpoint)
 
     # 获取打卡和流程申请数据
@@ -1149,14 +1154,14 @@ if __name__ == '__main__':
                 exit()
         elif 'No access' in data:
             print("API接口已过期，正在重新获取...")
-            clock_in_api_endpoint = get_clock_in_api_endpoint_online(cookie)
+            clock_in_api_endpoint = get_user_variable_online(cookie, CLOCK_IN_DATA_TITLE)
             if clock_in_api_endpoint:
                 save_clock_in_api_endpoint_to_config(clock_in_api_endpoint)
                 return fetch_function(*args)
             else:
                 print("打卡数据接口获取失败，请重试")
-                exit()
-            process_application_api_endpoint = get_process_application_api_endpoint_online(cookie)
+                exit()         
+            process_application_api_endpoint = get_user_variable_online(cookie, PROCESS_APPLICATION_DATA_TITLE)
             if process_application_api_endpoint:
                 save_process_application_api_endpoint_to_config(process_application_api_endpoint)
                 return fetch_function(*args)
