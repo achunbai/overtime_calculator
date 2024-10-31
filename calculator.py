@@ -2,10 +2,11 @@
 # 适用于 深圳佛山桂林
 # 评价部分从之前的html中移植，如有冒犯 雨我无瓜
 # -*- coding: utf-8 -*-
-import csv, os, json, time, shutil, requests, argparse, platform
+import csv, os, json, shutil, requests, argparse, platform
+import time as t
 from bs4 import BeautifulSoup
 from typing import Dict, Set, Tuple, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from tabulate import tabulate
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -544,7 +545,7 @@ def fetch_cookie_via_browser(browser='auto'):
         except Exception as e:
             print(f"获取Cookie时出错: {e}")
             # 不关闭浏览器，继续等待用户登录
-        time.sleep(1)  # 等待一秒后重新检查
+        t.sleep(1)  # 等待一秒后重新检查
 
 
 # 逻辑部分
