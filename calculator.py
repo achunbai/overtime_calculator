@@ -993,6 +993,67 @@ def summarize(result: list, workdays: set, holidays: list, total_late_count: int
 
     return table
 
+def check_and_refresh_data(fetch_function, *args):
+    """
+    检查数据是否过期并刷新数据。
+
+    参数:
+        fetch_function (function): 用于获取数据的函数。
+        *args: 获取数据函数所需的参数。
+
+    返回值:
+        data: 刷新后的数据，如果 Cookie 或 API 接口过期，会重新获取并更新数据。
+    """
+    data = fetch_function(*args)
+    if 'expired' in data:
+        print("Cookie已过期，正在重新获取...")
+        cookie = fetch_cookie_via_browser(args[1])  # 获取浏览器参数
+        print(f"cookie = {cookie}")
+        if cookie:
+            save_cookie(cookie)
+            # 更新 args 中的 Cookie 参数
+            args = list(args)
+            args[1] = cookie
+            args = tuple(args)
+            # 使用新的 Cookie 重新获取数据
+            data = fetch_function(*args)
+        else:
+            print("Cookie获取失败，请重试")
+            exit()
+    elif 'No access' in data:
+        print("API接口已过期，正在重新获取...")
+        cookie = args[1]  # 获取当前的 Cookie
+        # 更新 clock_in_api_endpoint
+        if 'clock_in_api_endpoint' in args[0]:
+            clock_in_api_endpoint = get_user_variable_online(cookie, CLOCK_IN_DATA_TITLE)
+            if clock_in_api_endpoint:
+                save_clock_in_api_endpoint_to_config(clock_in_api_endpoint)
+                # 更新 args 中的接口参数
+                args = list(args)
+                args[0] = clock_in_api_endpoint
+                args = tuple(args)
+                # 使用新的接口重新获取数据
+                data = fetch_function(*args)
+            else:
+                print("打卡数据接口获取失败，请重试")
+                exit()
+        # 更新 process_application_api_endpoint
+        elif 'process_application_api_endpoint' in args[0]:
+            process_application_api_endpoint = get_user_variable_online(cookie, PROCESS_APPLICATION_DATA_TITLE)
+            if process_application_api_endpoint:
+                save_process_application_api_endpoint_to_config(process_application_api_endpoint)
+                # 更新 args 中的接口参数
+                args = list(args)
+                args[0] = process_application_api_endpoint
+                args = tuple(args)
+                # 使用新的接口重新获取数据
+                data = fetch_function(*args)
+            else:
+                print("流程申请数据接口获取失败，请重试")
+                exit()
+    return data
+
+
 # 主程序
 if __name__ == '__main__':
     # 创建 ArgumentParser 对象
@@ -1137,43 +1198,12 @@ if __name__ == '__main__':
         save_process_application_api_endpoint_to_config(process_application_api_endpoint)
 
     # 获取打卡和流程申请数据
-    clock_in_data = get_clock_in_data(clock_in_api_endpoint, cookie, target_month, target_year)
-    process_application_data = get_process_application_data(process_application_api_endpoint, cookie)
-    attendance_data = get_attendance_data(clock_in_api_endpoint, cookie, target_month, target_year)
-
-    # 检查返回的 JSON 数据中是否包含 'expired' 或 'No access' 字段
-    def check_and_refresh_data(data, fetch_function, *args):
-        if 'expired' in data:
-            print("Cookie已过期，正在重新获取...")
-            cookie = fetch_cookie_via_browser(getattr(args, 'browser', ''))
-            print(f"cookie = {cookie}")
-            if cookie:
-                save_cookie(cookie)
-                return fetch_function(*args)
-            else:
-                print("Cookie获取失败，请重试")
-                exit()
-        elif 'No access' in data:
-            print("API接口已过期，正在重新获取...")
-            clock_in_api_endpoint = get_user_variable_online(cookie, CLOCK_IN_DATA_TITLE)
-            if clock_in_api_endpoint:
-                save_clock_in_api_endpoint_to_config(clock_in_api_endpoint)
-                return fetch_function(*args)
-            else:
-                print("打卡数据接口获取失败，请重试")
-                exit()         
-            process_application_api_endpoint = get_user_variable_online(cookie, PROCESS_APPLICATION_DATA_TITLE)
-            if process_application_api_endpoint:
-                save_process_application_api_endpoint_to_config(process_application_api_endpoint)
-                return fetch_function(*args)
-            else:
-                print("流程申请数据接口获取失败，请重试")
-                exit()
-        return data
-
-    clock_in_data = check_and_refresh_data(clock_in_data, get_clock_in_data, clock_in_api_endpoint, cookie, target_month, target_year)
-    process_application_data = check_and_refresh_data(process_application_data, get_process_application_data, process_application_api_endpoint, cookie)
-    attendance_data = check_and_refresh_data(attendance_data, get_attendance_data, clock_in_api_endpoint, cookie, target_month, target_year)
+    print(f"检查并获取打卡数据...")
+    clock_in_data = check_and_refresh_data(get_clock_in_data, clock_in_api_endpoint, cookie, target_month, target_year)
+    print(f"检查并获取流程申请数据...")
+    process_application_data = check_and_refresh_data(get_process_application_data, process_application_api_endpoint, cookie)
+    print(f"检查并获取出勤数据...")
+    attendance_data = check_and_refresh_data(get_attendance_data, clock_in_api_endpoint, cookie, target_month, target_year)
 
     # 获取并计算加班信息
     holidays, workdays = get_holiday_data_online(clock_in_data)
@@ -1229,6 +1259,8 @@ if __name__ == '__main__':
             personal_leave_time = (datetime.strptime(personal_leave[i][0][1], '%H:%M') - datetime.strptime(leave_start_time_str, '%H:%M')).total_seconds() / 3600
         
             # 比较 first_check_time 和 leave_start_time，取最早值
+            first_check_time = datetime.strptime(group_by_date[i][0], '%H:%M:%S').time()
+            last_check_time = datetime.strptime(group_by_date[i][-1], '%H:%M:%S').time()
             first_check_time = min(first_check_time, leave_start_time)
         late_minutes = late_time_cal(first_check_time, day_type, sum(daily_late_minutes[i]) if i in daily_late_minutes else 0 )				# 迟到了多久
         result.append((date, first_check_time[:8], last_check_time[:8], day_type, rate, overtime, overtime_pay, allowance, total_income, late_minutes, delay_deduction_time, annual_leave_time, personal_leave_time))
