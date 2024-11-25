@@ -6,7 +6,7 @@ import csv, os, json, shutil, requests, argparse, platform
 import time as t
 from bs4 import BeautifulSoup
 from typing import Dict, Set, Tuple, List, Optional
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time as dt_time
 from tabulate import tabulate
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -611,15 +611,15 @@ def parse_process_application_data(leave_data: List[Dict], user_cookie: str) -> 
                     if current_datetime.date() == start_datetime.date():
                         # 第一天的请假时间段
                         day_start_time = start_datetime
-                        day_end_time = min(end_datetime, datetime.combine(current_datetime.date(), time(18, 0)))
+                        day_end_time = min(end_datetime, datetime.combine(current_datetime.date(), dt_time(18, 0)))
                     elif current_datetime.date() == end_datetime.date():
                         # 最后一天的请假时间段
-                        day_start_time = datetime.combine(current_datetime.date(), time(9, 0))
+                        day_start_time = datetime.combine(current_datetime.date(), dt_time(9, 0))
                         day_end_time = end_datetime
                     else:
                         # 中间天的请假时间段
-                        day_start_time = datetime.combine(current_datetime.date(), time(9, 0))
-                        day_end_time = datetime.combine(current_datetime.date(), time(18, 0))
+                        day_start_time = datetime.combine(current_datetime.date(), dt_time(9, 0))
+                        day_end_time = datetime.combine(current_datetime.date(), dt_time(18, 0))
 
                     # 根据请假类型将数据存储到相应的字典中
                     if leave_type == '年假':
@@ -826,27 +826,33 @@ def income_cal(overtime_pay: str, allowance: str) -> str:
     # 两数相加
     return float(overtime_pay) + float(allowance)
 
-def late_time_cal(first_check_time: str, day_type: str, late_minutes: Optional[int] = None) -> str:
+def late_time_cal(first_check_time, day_type, late_minutes=None):
     """
     计算迟到时间。
 
     参数:
-        first_check_time (str): 第一次打卡时间，格式为 'HH:MM:SS'。
+        first_check_time (str 或 dt_time): 第一次打卡时间。
         day_type (str): 日期类型，可以是 "工作日", "周末", "节假日(周末)" 或 "节假日"。
         late_minutes (Optional[int]): 迟到分钟数。如果未提供，则根据 first_check_time 计算。
 
     返回值:
         str: 迟到时间（分钟）。
     """
+    # 如果是 dt_time 对象，转换为字符串
+    if isinstance(first_check_time, dt_time):
+        first_check_time_str = first_check_time.strftime('%H:%M:%S')
+    else:
+        first_check_time_str = first_check_time
+
     # 只要异地打卡就不算迟到
-    if first_check_time[-6:] == '(异地打卡)' or day_type != '工作日':
+    if first_check_time_str.endswith('(异地打卡)') or day_type != '工作日':
         return "0"
-    
+
     if late_minutes is None:
-        ret = (datetime.strptime(first_check_time, '%H:%M:%S') - datetime.strptime('09:00:00', '%H:%M:%S')).total_seconds() / 60
+        ret = (datetime.strptime(first_check_time_str, '%H:%M:%S') - datetime.strptime('09:00:00', '%H:%M:%S')).total_seconds() / 60
     else:
         ret = late_minutes
-    
+
     return str(ret) if ret > 0 else "0"
 
 def summarize(result: list, workdays: set, holidays: list, total_late_count: int, total_late_minutes: int) -> list:
@@ -1220,50 +1226,75 @@ if __name__ == '__main__':
     for item in clock_in_data:
         group_by_date.setdefault(item['SHIFTTERM'], []).append(item['CARDTIME'][11::])		# 过滤掉打卡时间里的年月日
     for i in group_by_date:
-        sorted(group_by_date[i], key=lambda time: datetime.strptime(time[:8], '%H:%M:%S'))	# 排序,时间早的在前面
-        date = i																# 日期
-        first_check_time = group_by_date[i][0]									# 最早的打卡时间
-        last_check_time = group_by_date[i][-1]									# 最晚的打卡时间
-        day_type = get_day_type(date, holidays, workdays)						# 今天啥日子
-        rate = pay_rate_cal(day_type)											# 加班一小时该给多少钱
-        overtime = overtime_cal(first_check_time, last_check_time, day_type)	# 加了多久班(单位小时)
+        # 排序，时间早的在前面
+        group_by_date[i] = sorted(group_by_date[i], key=lambda time_str: datetime.strptime(time_str[:8], '%H:%M:%S'))
+        date = i  # 日期
+    
+        # 将打卡时间转换为 dt_time 对象
+        first_check_time = datetime.strptime(group_by_date[i][0], '%H:%M:%S').time()
+        last_check_time = datetime.strptime(group_by_date[i][-1], '%H:%M:%S').time()
+        day_type = get_day_type(date, holidays, workdays)
+        rate = pay_rate_cal(day_type)
+        overtime = overtime_cal(first_check_time.strftime('%H:%M:%S'), last_check_time.strftime('%H:%M:%S'), day_type)
+    
         # 计算延时扣减总时间
         delay_deduction_time = 0.0
         if i in delay_deduction:
-            for start_time, end_time in delay_deduction[i]:
-                start_time = datetime.strptime(start_time, '%H:%M:%S')
-                end_time = datetime.strptime(end_time, '%H:%M:%S')
+            for start_time_str, end_time_str in delay_deduction[i]:
+                start_time = datetime.strptime(start_time_str, '%H:%M:%S')
+                end_time = datetime.strptime(end_time_str, '%H:%M:%S')
                 delay_deduction_time += (end_time - start_time).total_seconds() / 3600
             overtime -= delay_deduction_time
-        overtime_pay = overtime_pay_cal(overtime, rate)							# 加班费多少
-        overtime_income += float(overtime_pay)									# 总加班费
-        allowance = allowance_cal(overtime, day_type)							# 有没有食补
-        total_income = income_cal(overtime_pay, allowance)						# 一天的总收入
+    
+        overtime_pay = overtime_pay_cal(overtime, rate)  # 加班费多少
+        overtime_income += float(overtime_pay)  # 总加班费
+        allowance = allowance_cal(overtime, day_type)  # 有没有食补
+        total_income = income_cal(overtime_pay, allowance)  # 一天的总收入
+    
         # 计算事假和年假的时间
         annual_leave_time = 0.0
         personal_leave_time = 0.0
+    
         if i in annual_leave:
             # 获取 annual_leave 中的第一个时间
             leave_start_time_str = annual_leave[i][0][0]
             leave_start_time = datetime.strptime(leave_start_time_str, '%H:%M').time()
-            # 计算当天年假时间，第二个时间和第一个时间相减
+            # 计算当天年假时间
             annual_leave_time = (datetime.strptime(annual_leave[i][0][1], '%H:%M') - datetime.strptime(leave_start_time_str, '%H:%M')).total_seconds() / 3600
-
             # 比较 first_check_time 和 leave_start_time，取最早值
             first_check_time = min(first_check_time, leave_start_time)
+    
         if i in personal_leave:
             # 获取 personal_leave 中的第一个时间
             leave_start_time_str = personal_leave[i][0][0]
             leave_start_time = datetime.strptime(leave_start_time_str, '%H:%M').time()
-            # 计算当天事假时间，第二个时间和第一个时间相减
+            # 计算当天事假时间
             personal_leave_time = (datetime.strptime(personal_leave[i][0][1], '%H:%M') - datetime.strptime(leave_start_time_str, '%H:%M')).total_seconds() / 3600
-        
             # 比较 first_check_time 和 leave_start_time，取最早值
-            first_check_time = datetime.strptime(group_by_date[i][0], '%H:%M:%S').time()
-            last_check_time = datetime.strptime(group_by_date[i][-1], '%H:%M:%S').time()
             first_check_time = min(first_check_time, leave_start_time)
-        late_minutes = late_time_cal(first_check_time, day_type, sum(daily_late_minutes[i]) if i in daily_late_minutes else 0 )				# 迟到了多久
-        result.append((date, first_check_time[:8], last_check_time[:8], day_type, rate, overtime, overtime_pay, allowance, total_income, late_minutes, delay_deduction_time, annual_leave_time, personal_leave_time))
+    
+        # 计算迟到时间
+        late_minutes = late_time_cal(first_check_time, day_type, sum(daily_late_minutes[i]) if i in daily_late_minutes else 0)
+    
+        # 将时间对象转换为字符串用于输出
+        first_check_time_str = first_check_time.strftime('%H:%M:%S')
+        last_check_time_str = last_check_time.strftime('%H:%M:%S')
+    
+        result.append((
+            date,
+            first_check_time_str,
+            last_check_time_str,
+            day_type,
+            rate,
+            overtime,
+            overtime_pay,
+            allowance,
+            total_income,
+            late_minutes,
+            delay_deduction_time,
+            annual_leave_time,
+            personal_leave_time
+        ))
 
     # 评价信息
     rank = ''
