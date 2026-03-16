@@ -46,12 +46,27 @@ def get_cookie():
     从 COOKIE_FILE 中读取 Cookie。
 
     返回值:
-        dict: 如果存在 Cookie 文件，返回保存的 Cookie；否则返回 None。
+        str: 如果存在有效的 Cookie 文件，返回保存的 Cookie 字符串；否则返回 None。
     """
     if os.path.exists(COOKIES_FILE):
-        with open(COOKIES_FILE, 'r', encoding='utf-8') as file:
-            cookie = json.load(file)
-            return cookie
+        try:
+            with open(COOKIES_FILE, 'r', encoding='utf-8') as file:
+                cookie_data = json.load(file)
+
+            # 不在本地判断Cookie是否过期，由服务器响应决定
+            # 如果服务器返回过期/未授权响应，check_and_refresh_data 会自动重新获取
+            cookie = cookie_data.get('user_cookie')
+            if cookie:
+                if 'timestamp' in cookie_data:
+                    saved_time = datetime.fromtimestamp(cookie_data['timestamp'])
+                    print(f"使用已保存的Cookie（保存于 {saved_time.strftime('%Y-%m-%d %H:%M:%S')}）")
+                return cookie
+            else:
+                print("Cookie文件中无有效Cookie数据")
+                return None
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            print(f"读取Cookie文件失败: {e}")
+            return None
     return None
 
 def read_config():
@@ -138,14 +153,18 @@ def ensure_directory_exists(file_path):
 
 def save_cookie(cookie):
     """
-    保存 Cookie 到 COOKIE_FILE。
+    保存 Cookie 到 COOKIE_FILE，包含时间戳。
 
     参数:
-        cookie (dict): 要保存的 Cookie。
+        cookie (str): 要保存的 Cookie 字符串。
     """
     ensure_directory_exists(COOKIES_FILE)
+    cookie_data = {
+        'user_cookie': cookie,
+        'timestamp': datetime.now().timestamp()
+    }
     with open(COOKIES_FILE, 'w', encoding='utf-8') as file:
-        json.dump({'user_cookie': cookie}, file)
+        json.dump(cookie_data, file, ensure_ascii=False, indent=2)
 
 def save_config(config_data):
     """
@@ -456,6 +475,9 @@ def validate_user_cookie(user_cookie):
     返回值：
         如果包含所有必需字段，返回 True；否则返回 False。
     """
+    if not user_cookie or not isinstance(user_cookie, str):
+        return False
+        
     required_fields = [
         'quectel_lang',
         'quectel_token',
@@ -467,14 +489,19 @@ def validate_user_cookie(user_cookie):
         'EMPTYPE'
     ]
 
-    # 将 Cookie 字符串转换为字典
-    cookie_dict = dict(item.strip().split("=") for item in user_cookie.split(";"))
+    try:
+        # 将 Cookie 字符串转换为字典
+        cookie_dict = dict(item.strip().split("=", 1) for item in user_cookie.split(";") if "=" in item)
 
-    # 检查是否包含所有必需字段
-    for field in required_fields:
-        if field not in cookie_dict:
-            return False
-    return True
+        # 检查是否包含所有必需字段
+        for field in required_fields:
+            if field not in cookie_dict or not cookie_dict[field]:
+                print(f"缺少必需的Cookie字段: {field}")
+                return False
+        return True
+    except Exception as e:
+        print(f"Cookie验证失败: {e}")
+        return False
 
 def fetch_cookie_via_browser(browser='auto'):
     """
@@ -697,8 +724,8 @@ def parse_attendance_data(attendance_json: str) -> Tuple[Dict[str, List[int]], i
     
     # 初始化结果变量
     daily_late_minutes = {}
-    total_late_count = None
-    total_late_minutes = None
+    total_late_count = 0  # 默认值改为0
+    total_late_minutes = 0  # 默认值改为0
     
     for record in attendance_data:
         # 提取日期和每日的迟到分钟数
@@ -712,9 +739,9 @@ def parse_attendance_data(attendance_json: str) -> Tuple[Dict[str, List[int]], i
             daily_late_minutes[date_str].append(late_minutes)
         
         # 提取当月累计的迟到次数和迟到分钟数（只需要提取一次）
-        if total_late_count is None:
+        if total_late_count == 0:  # 只在第一次时设置
             total_late_count = int(record.get("LATE", 0))
-        if total_late_minutes is None:
+        if total_late_minutes == 0:  # 只在第一次时设置
             total_late_minutes = int(record.get("LATEMIN", 0))
 
     return daily_late_minutes, total_late_count, total_late_minutes
@@ -759,7 +786,7 @@ def pay_rate_cal(day_type: str) -> str:
     # 工作日加班费20块/小时,周末30,节假日60
     return 20 if day_type == "工作日" else 30 if day_type == "周末" or day_type == "节假日(周末)" else 60 if day_type == "节假日" else 0
 
-def overtime_cal(first_check_time: str, last_check_time: str, day_type: str) -> str:
+def overtime_cal(first_check_time: str, last_check_time: str, day_type: str) -> float:
     """
     计算加班时长。
 
@@ -769,62 +796,99 @@ def overtime_cal(first_check_time: str, last_check_time: str, day_type: str) -> 
         day_type (str): 日期类型，可以是 "工作日", "周末", "节假日(周末)" 或 "节假日"。
 
     返回值:
-        str: 加班时长（小时）。
+        float: 加班时长（小时）。
     """
-    # 只要异地打卡就不算加班,即使是节假日
-    if last_check_time[-6:] == '(异地打卡)':
-        return 0
-    if day_type == '工作日':
-        ret = (datetime.strptime(last_check_time, '%H:%M:%S') - datetime.strptime('19:00:00', '%H:%M:%S')).total_seconds()
-        return ret / 3600 if ret > 0 else 0
-    else:
-        ret = (datetime.strptime(last_check_time, '%H:%M:%S') - datetime.strptime(first_check_time, '%H:%M:%S')).total_seconds()
-        return ret / 3600 if ret > 0 else 0
+    try:
+        # 只要异地打卡就不算加班,即使是节假日
+        if last_check_time.endswith('(异地打卡)'):
+            return 0.0
+            
+        # 清理时间字符串，移除可能的异地打卡标记
+        clean_first_time = first_check_time.replace('(异地打卡)', '').strip()
+        clean_last_time = last_check_time.replace('(异地打卡)', '').strip()
+        
+        if day_type == '工作日':
+            last_dt = datetime.strptime(clean_last_time, '%H:%M:%S')
+            end_work_dt = datetime.strptime('19:00:00', '%H:%M:%S')
+            ret = (last_dt - end_work_dt).total_seconds()
+            return ret / 3600 if ret > 0 else 0.0
+        else:
+            first_dt = datetime.strptime(clean_first_time, '%H:%M:%S')
+            last_dt = datetime.strptime(clean_last_time, '%H:%M:%S')
+            ret = (last_dt - first_dt).total_seconds()
+            return ret / 3600 if ret > 0 else 0.0
+    except (ValueError, AttributeError) as e:
+        print(f"计算加班时长时出错: {e}, 时间: {first_check_time} - {last_check_time}")
+        return 0.0
 
-def overtime_pay_cal(overtime: str, rate: str) -> str:
+def overtime_pay_cal(overtime: float, rate: float) -> float:
     """
     计算加班薪资。
 
     参数:
-        overtime (str): 加班时长（小时）。
-        rate (str): 加班费率。
+        overtime (float): 加班时长（小时）。
+        rate (float): 加班费率。
 
     返回值:
-        str: 加班薪资。
+        float: 加班薪资。
     """
-    # 两数相乘
-    return str(float(overtime) * float(rate))
+    try:
+        # 确保参数为数字类型
+        if isinstance(overtime, str):
+            overtime = float(overtime)
+        if isinstance(rate, str):
+            rate = float(rate)
+        return overtime * rate
+    except (ValueError, TypeError) as e:
+        print(f"计算加班薪资时出错: {e}, 加班时长: {overtime}, 费率: {rate}")
+        return 0.0
 
-def allowance_cal(overtime: str, day_type: str) -> str:
+def allowance_cal(overtime: float, day_type: str) -> float:
     """
     计算餐补。
 
     参数:
-        overtime (str): 加班时长（小时）。
+        overtime (float): 加班时长（小时）。
         day_type (str): 日期类型，可以是 "工作日", "周末", "节假日(周末)" 或 "节假日"。
 
     返回值:
-        str: 餐补金额。
+        float: 餐补金额。
     """
-    # 工作日加班超过1小时给20,周末和节假日超过4小时给20
-    if day_type == '工作日':
-        return 20 if float(overtime) >= 1.0 else 0
-    else:
-        return 20 if float(overtime) >= 4.0 else 0
+    try:
+        # 确保overtime为数字类型
+        if isinstance(overtime, str):
+            overtime = float(overtime)
+            
+        # 工作日加班超过1小时给20,周末和节假日超过4小时给20
+        if day_type == '工作日':
+            return 20.0 if overtime >= 1.0 else 0.0
+        else:
+            return 20.0 if overtime >= 4.0 else 0.0
+    except (ValueError, TypeError) as e:
+        print(f"计算餐补时出错: {e}, 加班时长: {overtime}")
+        return 0.0
 
-def income_cal(overtime_pay: str, allowance: str) -> str:
+def income_cal(overtime_pay: float, allowance: float) -> float:
     """
     计算总收入。
 
     参数:
-        overtime_pay (str): 加班薪资。
-        allowance (str): 餐补金额。
+        overtime_pay (float): 加班薪资。
+        allowance (float): 餐补金额。
 
     返回值:
-        str: 总收入。
+        float: 总收入。
     """
-    # 两数相加
-    return float(overtime_pay) + float(allowance)
+    try:
+        # 确保参数为数字类型
+        if isinstance(overtime_pay, str):
+            overtime_pay = float(overtime_pay)
+        if isinstance(allowance, str):
+            allowance = float(allowance)
+        return overtime_pay + allowance
+    except (ValueError, TypeError) as e:
+        print(f"计算总收入时出错: {e}, 加班薪资: {overtime_pay}, 餐补: {allowance}")
+        return 0.0
 
 def late_time_cal(first_check_time, day_type, late_minutes=None):
     """
@@ -836,24 +900,32 @@ def late_time_cal(first_check_time, day_type, late_minutes=None):
         late_minutes (Optional[int]): 迟到分钟数。如果未提供，则根据 first_check_time 计算。
 
     返回值:
-        str: 迟到时间（分钟）。
+        float: 迟到时间（分钟）。
     """
-    # 如果是 dt_time 对象，转换为字符串
-    if isinstance(first_check_time, dt_time):
-        first_check_time_str = first_check_time.strftime('%H:%M:%S')
-    else:
-        first_check_time_str = first_check_time
+    try:
+        # 如果是 dt_time 对象，转换为字符串
+        if isinstance(first_check_time, dt_time):
+            first_check_time_str = first_check_time.strftime('%H:%M:%S')
+        else:
+            first_check_time_str = str(first_check_time)
 
-    # 只要异地打卡就不算迟到
-    if first_check_time_str.endswith('(异地打卡)') or day_type != '工作日':
-        return "0"
+        # 只要异地打卡就不算迟到
+        if first_check_time_str.endswith('(异地打卡)') or day_type != '工作日':
+            return 0.0
 
-    if late_minutes is None:
-        ret = (datetime.strptime(first_check_time_str, '%H:%M:%S') - datetime.strptime('09:00:00', '%H:%M:%S')).total_seconds() / 60
-    else:
-        ret = late_minutes
+        if late_minutes is None:
+            # 清理时间字符串
+            clean_time = first_check_time_str.replace('(异地打卡)', '').strip()
+            first_dt = datetime.strptime(clean_time, '%H:%M:%S')
+            work_start_dt = datetime.strptime('09:00:00', '%H:%M:%S')
+            ret = (first_dt - work_start_dt).total_seconds() / 60
+        else:
+            ret = float(late_minutes) if late_minutes is not None else 0.0
 
-    return str(ret) if ret > 0 else "0"
+        return ret if ret > 0 else 0.0
+    except (ValueError, AttributeError, TypeError) as e:
+        print(f"计算迟到时间时出错: {e}, 打卡时间: {first_check_time}")
+        return 0.0
 
 def summarize(result: list, workdays: set, holidays: list, total_late_count: int, total_late_minutes: int) -> list:
     """
@@ -869,6 +941,14 @@ def summarize(result: list, workdays: set, holidays: list, total_late_count: int
     返回值:
         list: 汇总统计结果。
     """
+    if not result:
+        print("没有打卡记录可以汇总")
+        return []
+        
+    # 确保参数不为None
+    total_late_count = total_late_count if total_late_count is not None else 0
+    total_late_minutes = total_late_minutes if total_late_minutes is not None else 0
+    
     day_of_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     year = int(result[0][0].split('-')[0])
     month = int(result[0][0].split('-')[1])
@@ -887,20 +967,32 @@ def summarize(result: list, workdays: set, holidays: list, total_late_count: int
 
     # 先计算事假的小时数
     for i in result:
-        total_personal_leave_hours += (float(i[12]))
+        try:
+            total_personal_leave_hours += float(i[12]) if len(i) > 12 and i[12] else 0.0
+        except (ValueError, IndexError) as e:
+            print(f"处理事假时间时出错: {e}")
     
     personal_leave_remain_hours = total_personal_leave_hours
     for i in result:
-        total_overtime_pay += float(i[6])
-        total_meal_allowance += float(i[7])
-        total_workday_overtime_pay += float(i[6]) if i[3] == '工作日' else 0.0
-        total_weekend_overtime_pay += float(i[6]) if i[3] == '周末' else 0.0
-        total_holiday_overtime_pay += float(i[6]) if i[3] == '节假日' else 0.0
-        total_income += float(i[8])
-        total_workday_hours += float(i[5]) if i[3] == '工作日' else 0.0
-        total_weekend_hours += float(i[5]) if i[3] == '周末' else 0.0
-        total_holiday_hours += float(i[5]) if i[3] == '节假日' else 0.0
-        actual_workdays += 1 if i[3] == '工作日' else 0
+        try:
+            overtime_pay = float(i[6]) if i[6] else 0.0
+            meal_allowance = float(i[7]) if i[7] else 0.0
+            overtime_hours = float(i[5]) if i[5] else 0.0
+            total_income_val = float(i[8]) if i[8] else 0.0
+            
+            total_overtime_pay += overtime_pay
+            total_meal_allowance += meal_allowance
+            total_workday_overtime_pay += overtime_pay if i[3] == '工作日' else 0.0
+            total_weekend_overtime_pay += overtime_pay if i[3] == '周末' else 0.0
+            total_holiday_overtime_pay += overtime_pay if i[3] == '节假日' else 0.0
+            total_income += total_income_val
+            total_workday_hours += overtime_hours if i[3] == '工作日' else 0.0
+            total_weekend_hours += overtime_hours if i[3] == '周末' else 0.0
+            total_holiday_hours += overtime_hours if i[3] == '节假日' else 0.0
+            actual_workdays += 1 if i[3] == '工作日' else 0
+        except (ValueError, IndexError, TypeError) as e:
+            print(f"处理记录时出错: {e}, 记录: {i}")
+            continue
         
     # 计算实际扣减后的加班费
     # 事假可以用加班抵扣，优先抵扣工作日加班
@@ -924,32 +1016,32 @@ def summarize(result: list, workdays: set, holidays: list, total_late_count: int
         personal_leave_remain_hours = 0
 
     # 处理迟到时间的扣减
-    late_minutes_remain = total_late_minutes
+    late_minutes_remain = total_late_minutes if total_late_minutes is not None else 0
     if late_minutes_remain > 0:
         for i in result:
             if late_minutes_remain <= 0:
                 break
-            if i[3] == '工作日':
-                if 1 <= int(i[1].split(':')[1]) <= 30:
-                    late_minutes_remain -= 60 + int(i[1].split(':')[1])
-                elif 31 <= int(i[1].split(':')[1]) <= 60:
-                    late_minutes_remain -= 120 + int(i[1].split(':')[1])
-                elif int(i[1].split(':')[1]) > 60:
-                    late_minutes_remain -= 480
-            elif i[3] == '周末':
-                if 1 <= int(i[1].split(':')[1]) <= 30:
-                    late_minutes_remain -= 60 + int(i[1].split(':')[1])
-                elif 31 <= int(i[1].split(':')[1]) <= 60:
-                    late_minutes_remain -= 120 + int(i[1].split(':')[1])
-                elif int(i[1].split(':')[1]) > 60:
-                    late_minutes_remain -= 480
-            elif i[3] == '节假日':
-                if 1 <= int(i[1].split(':')[1]) <= 30:
-                    late_minutes_remain -= 60 + int(i[1].split(':')[1])
-                elif 31 <= int(i[1].split(':')[1]) <= 60:
-                    late_minutes_remain -= 120 + int(i[1].split(':')[1])
-                elif int(i[1].split(':')[1]) > 60:
-                    late_minutes_remain -= 480
+            try:
+                # 获取当天的迟到分钟数（result中的第9个元素）
+                daily_late = float(i[9]) if i[9] else 0.0
+                if daily_late > 0:
+                    if i[3] == '工作日':
+                        if 1 <= daily_late <= 30:
+                            late_minutes_remain -= 60 + daily_late
+                        elif 31 <= daily_late <= 60:
+                            late_minutes_remain -= 120 + daily_late
+                        elif daily_late > 60:
+                            late_minutes_remain -= 480
+                    elif i[3] in ['周末', '节假日']:
+                        if 1 <= daily_late <= 30:
+                            late_minutes_remain -= 60 + daily_late
+                        elif 31 <= daily_late <= 60:
+                            late_minutes_remain -= 120 + daily_late
+                        elif daily_late > 60:
+                            late_minutes_remain -= 480
+            except (ValueError, IndexError, TypeError) as e:
+                print(f"处理迟到扣减时出错: {e}")
+                continue
 
     actual_workday_overtime_pay = actual_workday_hours * 20
     actual_weekend_overtime_pay = actual_weekend_hours * 30
@@ -1010,58 +1102,93 @@ def check_and_refresh_data(fetch_function, *args):
     返回值:
         data: 刷新后的数据，如果 Cookie 或 API 接口过期，会重新获取并更新数据。
     """
-    data = fetch_function(*args)
-    if 'expired' in data:
-        print("Cookie已过期，正在重新获取...")
-        cookie = fetch_cookie_via_browser(args[1])  # 获取浏览器参数
-        print(f"cookie = {cookie}")
+    try:
+        data = fetch_function(*args)
+        
+        # 检查返回的数据是否为字符串，如果是则可能包含错误信息
+        if isinstance(data, str):
+            if 'expired' in data or 'login' in data.lower() or 'unauthorized' in data.lower():
+                print("Cookie已过期，正在重新获取...")
+                browser_arg = 'auto'  # 默认浏览器
+                # 查找浏览器参数，如果存在的话
+                if len(args) > 2 and isinstance(args[2], str) and args[2] in ['chrome', 'edge', 'auto']:
+                    browser_arg = args[2]
+                    
+                cookie = fetch_cookie_via_browser(browser_arg)
+                print(f"获取到新的Cookie")
+                if cookie:
+                    save_cookie(cookie)
+                    # 更新 args 中的 Cookie 参数
+                    args = list(args)
+                    args[1] = cookie
+                    args = tuple(args)
+                    # 使用新的 Cookie 重新获取数据
+                    data = fetch_function(*args)
+                else:
+                    print("Cookie获取失败，请重试")
+                    exit()
+            elif 'No access' in data or 'access denied' in data.lower():
+                print("API接口已过期，正在重新获取...")
+                cookie = args[1]  # 获取当前的 Cookie
+                # 判断是哪种接口需要更新
+                if len(args) > 0:
+                    try:
+                        clock_in_api_endpoint = get_user_variable_online(cookie, CLOCK_IN_DATA_TITLE)
+                        if clock_in_api_endpoint:
+                            save_clock_in_api_endpoint_to_config(clock_in_api_endpoint)
+                            # 更新 args 中的接口参数
+                            args = list(args)
+                            args[0] = clock_in_api_endpoint
+                            args = tuple(args)
+                            # 使用新的接口重新获取数据
+                            data = fetch_function(*args)
+                        else:
+                            print("接口获取失败，请重试")
+                            exit()
+                    except Exception as e:
+                        print(f"接口更新失败: {e}")
+                        exit()
+        
+        # 检查返回的数据是否为字典且包含错误信息
+        elif isinstance(data, dict):
+            if data.get('code') == 'expired' or data.get('status') == 'unauthorized':
+                print("Cookie已过期，正在重新获取...")
+                cookie = fetch_cookie_via_browser('auto')
+                if cookie:
+                    save_cookie(cookie)
+                    args = list(args)
+                    args[1] = cookie
+                    args = tuple(args)
+                    data = fetch_function(*args)
+                else:
+                    print("Cookie获取失败，请重试")
+                    exit()
+                    
+        return data
+        
+    except Exception as e:
+        print(f"数据获取失败: {e}")
+        # 尝试重新获取Cookie
+        print("尝试重新获取Cookie...")
+        cookie = fetch_cookie_via_browser('auto')
         if cookie:
             save_cookie(cookie)
-            # 更新 args 中的 Cookie 参数
             args = list(args)
             args[1] = cookie
             args = tuple(args)
-            # 使用新的 Cookie 重新获取数据
-            data = fetch_function(*args)
+            try:
+                data = fetch_function(*args)
+                return data
+            except Exception as retry_e:
+                print(f"重试后仍然失败: {retry_e}")
+                exit()
         else:
-            print("Cookie获取失败，请重试")
+            print("Cookie获取失败，程序退出")
             exit()
-    elif 'No access' in data:
-        print("API接口已过期，正在重新获取...")
-        cookie = args[1]  # 获取当前的 Cookie
-        # 更新 clock_in_api_endpoint
-        if 'clock_in_api_endpoint' in args[0]:
-            clock_in_api_endpoint = get_user_variable_online(cookie, CLOCK_IN_DATA_TITLE)
-            if clock_in_api_endpoint:
-                save_clock_in_api_endpoint_to_config(clock_in_api_endpoint)
-                # 更新 args 中的接口参数
-                args = list(args)
-                args[0] = clock_in_api_endpoint
-                args = tuple(args)
-                # 使用新的接口重新获取数据
-                data = fetch_function(*args)
-            else:
-                print("打卡数据接口获取失败，请重试")
-                exit()
-        # 更新 process_application_api_endpoint
-        elif 'process_application_api_endpoint' in args[0]:
-            process_application_api_endpoint = get_user_variable_online(cookie, PROCESS_APPLICATION_DATA_TITLE)
-            if process_application_api_endpoint:
-                save_process_application_api_endpoint_to_config(process_application_api_endpoint)
-                # 更新 args 中的接口参数
-                args = list(args)
-                args[0] = process_application_api_endpoint
-                args = tuple(args)
-                # 使用新的接口重新获取数据
-                data = fetch_function(*args)
-            else:
-                print("流程申请数据接口获取失败，请重试")
-                exit()
-    return data
 
 
 # 主程序
-if __name__ == '__main__':
+def main():
     # 创建 ArgumentParser 对象
     parser = argparse.ArgumentParser(description='参数配置，是否使用本地数据，是否清除或者删除配置文件，是否指定浏览器')
 
@@ -1104,8 +1231,8 @@ if __name__ == '__main__':
             with open(LOCAL_DATA_PATH + 'data.json', 'r', encoding='utf-8') as file:
                 clock_in_data = json.load(file)
             print("使用本地数据，请注意节假日信息年份")
-            holidays = Dict()
-            workdays = Set()
+            holidays = {}
+            workdays = set()
             if os.path.exists(LOCAL_DATA_PATH + 'holidays.json'):
                 with open(LOCAL_DATA_PATH + 'holidays.json', 'r', encoding='utf-8') as file:
                     info = json.load(file)
@@ -1117,9 +1244,12 @@ if __name__ == '__main__':
             group_by_date = {}	    # 按日期统计打卡时间
             overtime_income = 0.0   # 加班费
             for item in clock_in_data:
+                # 过滤掉包含异地打卡的数据
+                if "(异地打卡)" in item['CARDTIME']:
+                    continue
                 group_by_date.setdefault(item['SHIFTTERM'], []).append(item['CARDTIME'][11::])		# 过滤掉打卡时间里的年月日
             for i in group_by_date:
-                sorted(group_by_date[i], key=lambda time: datetime.strptime(time[:8], '%H:%M:%S'))	# 排序,时间早的在前面
+                group_by_date[i] = sorted(group_by_date[i], key=lambda time: datetime.strptime(time[:8], '%H:%M:%S'))	# 排序,时间早的在前面
                 date = i																# 日期
                 first_check_time = group_by_date[i][0]									# 最早的打卡时间
                 last_check_time = group_by_date[i][-1]									# 最晚的打卡时间
@@ -1145,10 +1275,9 @@ if __name__ == '__main__':
             elif 1500 <= overtime_income < 2000:
                 rank = '逆天'
             elif overtime_income >= 2000:
-                rank = f'你是懂加班的，白加了 {overtime_pay - 2000} 元'
-            current_year = datetime.now().year
+                rank = f'你是懂加班的，白加了 {overtime_income - 2000:.2f} 元'
             file_name = OUTPUT_PATH + '本地数据加班情况分析报表.csv'
-            summarize(result, workdays, holidays)
+            summarize(result, workdays, holidays, 0, 0)
             print(f"\n**********************\n义眼丁真，鉴定您的级别为：\n {rank}\n**********************\n")
             print(f"正在保存数据到 {file_name}...")
 
@@ -1184,7 +1313,7 @@ if __name__ == '__main__':
     # 如果配置文件不存在或者配置文件中的接口地址为空，则需要重新获取
     if not cookie:
         print("未找到Cookie，正在启动浏览器以获取Cookie...")
-        cookie = fetch_cookie_via_browser(getattr(args, 'browser', ''))
+        cookie = fetch_cookie_via_browser(getattr(args, 'broswer', 'auto'))
         if cookie:
             save_cookie(cookie)
         else:
@@ -1212,6 +1341,10 @@ if __name__ == '__main__':
     attendance_data = check_and_refresh_data(get_attendance_data, clock_in_api_endpoint, cookie, target_month, target_year)
 
     # 获取并计算加班信息
+    if not clock_in_data or not isinstance(clock_in_data, list):
+        print("打卡数据为空或格式不正确，程序退出")
+        exit()
+        
     holidays, workdays = get_holiday_data_online(clock_in_data)
     # 从流程申请中获取年假、事假以及延时工时扣减数据
     annual_leave, personal_leave, delay_deduction = parse_process_application_data(process_application_data, cookie)
@@ -1223,78 +1356,112 @@ if __name__ == '__main__':
     overtime_income = 0.0       # 加班费
     annual_leave_total = 0.0    # 年假总时间
     personal_leave_total = 0.0  # 事假总时间
+    
+    print(f"正在处理 {len(clock_in_data)} 条打卡记录...")
+    
     for item in clock_in_data:
+        # 验证数据完整性
+        if not isinstance(item, dict) or 'SHIFTTERM' not in item or 'CARDTIME' not in item:
+            print(f"跳过无效的打卡记录: {item}")
+            continue
+            
+        # 过滤掉包含异地打卡的数据
+        if "(异地打卡)" in item['CARDTIME']:
+            continue
         group_by_date.setdefault(item['SHIFTTERM'], []).append(item['CARDTIME'][11::])		# 过滤掉打卡时间里的年月日
     for i in group_by_date:
-        # 排序，时间早的在前面
-        group_by_date[i] = sorted(group_by_date[i], key=lambda time_str: datetime.strptime(time_str[:8], '%H:%M:%S'))
-        date = i  # 日期
-    
-        # 将打卡时间转换为 dt_time 对象
-        first_check_time = datetime.strptime(group_by_date[i][0], '%H:%M:%S').time()
-        last_check_time = datetime.strptime(group_by_date[i][-1], '%H:%M:%S').time()
-        day_type = get_day_type(date, holidays, workdays)
-        rate = pay_rate_cal(day_type)
-        overtime = overtime_cal(first_check_time.strftime('%H:%M:%S'), last_check_time.strftime('%H:%M:%S'), day_type)
-    
-        # 计算延时扣减总时间
-        delay_deduction_time = 0.0
-        if i in delay_deduction:
-            for start_time_str, end_time_str in delay_deduction[i]:
-                start_time = datetime.strptime(start_time_str, '%H:%M:%S')
-                end_time = datetime.strptime(end_time_str, '%H:%M:%S')
-                delay_deduction_time += (end_time - start_time).total_seconds() / 3600
-            overtime -= delay_deduction_time
-    
-        overtime_pay = overtime_pay_cal(overtime, rate)  # 加班费多少
-        overtime_income += float(overtime_pay)  # 总加班费
-        allowance = allowance_cal(overtime, day_type)  # 有没有食补
-        total_income = income_cal(overtime_pay, allowance)  # 一天的总收入
-    
-        # 计算事假和年假的时间
-        annual_leave_time = 0.0
-        personal_leave_time = 0.0
-    
-        if i in annual_leave:
-            # 获取 annual_leave 中的第一个时间
-            leave_start_time_str = annual_leave[i][0][0]
-            leave_start_time = datetime.strptime(leave_start_time_str, '%H:%M').time()
-            # 计算当天年假时间
-            annual_leave_time = (datetime.strptime(annual_leave[i][0][1], '%H:%M') - datetime.strptime(leave_start_time_str, '%H:%M')).total_seconds() / 3600
-            # 比较 first_check_time 和 leave_start_time，取最早值
-            first_check_time = min(first_check_time, leave_start_time)
-    
-        if i in personal_leave:
-            # 获取 personal_leave 中的第一个时间
-            leave_start_time_str = personal_leave[i][0][0]
-            leave_start_time = datetime.strptime(leave_start_time_str, '%H:%M').time()
-            # 计算当天事假时间
-            personal_leave_time = (datetime.strptime(personal_leave[i][0][1], '%H:%M') - datetime.strptime(leave_start_time_str, '%H:%M')).total_seconds() / 3600
-            # 比较 first_check_time 和 leave_start_time，取最早值
-            first_check_time = min(first_check_time, leave_start_time)
-    
-        # 计算迟到时间
-        late_minutes = late_time_cal(first_check_time, day_type, sum(daily_late_minutes[i]) if i in daily_late_minutes else 0)
-    
-        # 将时间对象转换为字符串用于输出
-        first_check_time_str = first_check_time.strftime('%H:%M:%S')
-        last_check_time_str = last_check_time.strftime('%H:%M:%S')
-    
-        result.append((
-            date,
-            first_check_time_str,
-            last_check_time_str,
-            day_type,
-            rate,
-            overtime,
-            overtime_pay,
-            allowance,
-            total_income,
-            late_minutes,
-            delay_deduction_time,
-            annual_leave_time,
-            personal_leave_time
-        ))
+        try:
+            # 排序，时间早的在前面
+            group_by_date[i] = sorted(group_by_date[i], key=lambda time_str: datetime.strptime(time_str[:8], '%H:%M:%S'))
+            date = i  # 日期
+        
+            # 确保有打卡记录
+            if not group_by_date[i]:
+                print(f"跳过日期 {date}，无有效打卡记录")
+                continue
+        
+            # 将打卡时间转换为 dt_time 对象，先去除 "(异地打卡)" 后缀
+            first_check_time = datetime.strptime(
+                group_by_date[i][0].replace('(异地打卡)', '').strip(), '%H:%M:%S'
+            ).time()
+            last_check_time = datetime.strptime(
+                group_by_date[i][-1].replace('(异地打卡)', '').strip(), '%H:%M:%S'
+            ).time()
+            day_type = get_day_type(date, holidays, workdays)
+            rate = pay_rate_cal(day_type)
+            overtime = overtime_cal(first_check_time.strftime('%H:%M:%S'), last_check_time.strftime('%H:%M:%S'), day_type)
+        
+            # 计算延时扣减总时间
+            delay_deduction_time = 0.0
+            if i in delay_deduction:
+                for start_time_str, end_time_str in delay_deduction[i]:
+                    try:
+                        start_time = datetime.strptime(start_time_str, '%H:%M:%S')
+                        end_time = datetime.strptime(end_time_str, '%H:%M:%S')
+                        delay_deduction_time += (end_time - start_time).total_seconds() / 3600
+                    except ValueError as e:
+                        print(f"延时扣减时间格式错误: {e}")
+                overtime = max(0, overtime - delay_deduction_time)  # 确保不为负数
+        
+            overtime_pay = overtime_pay_cal(overtime, rate)  # 加班费多少
+            overtime_income += overtime_pay  # 总加班费
+            allowance = allowance_cal(overtime, day_type)  # 有没有食补
+            total_income = income_cal(overtime_pay, allowance)  # 一天的总收入
+        
+            # 计算事假和年假的时间
+            annual_leave_time = 0.0
+            personal_leave_time = 0.0
+        
+            if i in annual_leave:
+                try:
+                    # 获取 annual_leave 中的第一个时间
+                    leave_start_time_str = annual_leave[i][0][0]
+                    leave_start_time = datetime.strptime(leave_start_time_str, '%H:%M').time()
+                    # 计算当天年假时间
+                    annual_leave_time = (datetime.strptime(annual_leave[i][0][1], '%H:%M') - datetime.strptime(leave_start_time_str, '%H:%M')).total_seconds() / 3600
+                    # 比较 first_check_time 和 leave_start_time，取最早值
+                    first_check_time = min(first_check_time, leave_start_time)
+                except (ValueError, IndexError) as e:
+                    print(f"处理年假数据时出错: {e}")
+        
+            if i in personal_leave:
+                try:
+                    # 获取 personal_leave 中的第一个时间
+                    leave_start_time_str = personal_leave[i][0][0]
+                    leave_start_time = datetime.strptime(leave_start_time_str, '%H:%M').time()
+                    # 计算当天事假时间
+                    personal_leave_time = (datetime.strptime(personal_leave[i][0][1], '%H:%M') - datetime.strptime(leave_start_time_str, '%H:%M')).total_seconds() / 3600
+                    # 比较 first_check_time 和 leave_start_time，取最早值
+                    first_check_time = min(first_check_time, leave_start_time)
+                except (ValueError, IndexError) as e:
+                    print(f"处理事假数据时出错: {e}")
+        
+            # 计算迟到时间
+            late_minutes = late_time_cal(first_check_time, day_type, sum(daily_late_minutes[i]) if i in daily_late_minutes else 0)
+        
+            # 将时间对象转换为字符串用于输出
+            first_check_time_str = first_check_time.strftime('%H:%M:%S')
+            last_check_time_str = last_check_time.strftime('%H:%M:%S')
+        
+            result.append((
+                date,
+                first_check_time_str,
+                last_check_time_str,
+                day_type,
+                rate,
+                overtime,
+                overtime_pay,
+                allowance,
+                total_income,
+                late_minutes,
+                delay_deduction_time,
+                annual_leave_time,
+                personal_leave_time
+            ))
+            
+        except Exception as e:
+            print(f"处理日期 {i} 的数据时出错: {e}")
+            continue
 
     # 评价信息
     rank = ''
@@ -1309,7 +1476,7 @@ if __name__ == '__main__':
     elif 1500 <= overtime_income < 2000:
         rank = '逆天'
     elif overtime_income >= 2000:
-        rank = f'你是懂加班的，白加了 {overtime_pay - 2000} 元'
+        rank = f'你是懂加班的，白加了 {overtime_income - 2000:.2f} 元'
     print(f"\n**********************\n义眼丁真，鉴定您的级别为：\n {rank}\n**********************\n")
     
     # 汇总统计结果
@@ -1320,10 +1487,21 @@ if __name__ == '__main__':
     print(f"正在保存数据到 {file_name}...")
 
     # 保存报表
-    ensure_directory_exists(OUTPUT_PATH)
+    ensure_directory_exists(file_name)
     with open(file_name, 'w', newline='', encoding='utf-8-sig') as csvfile:    
         csvwriter = csv.writer(csvfile)
         csvwriter.writerow(["日期", "最早打卡时间", "最晚打卡时间", "本日性质", "加班时薪", "加班时长", "加班薪资", "延时餐补", "总收入", "迟到分钟数", "延时工时扣减时间", "年假时间", "事假时间"])
         csvwriter.writerows(result)
         csvwriter.writerows([[], [], ["汇总项目", "信息"]])  # 写入两个空行和汇总项目表头
         csvwriter.writerows(summarize_data)
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n程序被用户中断退出")
+        exit(0)
+    except Exception as e:
+        print(f"\n程序运行过程中出现未预期的错误: {e}")
+        print("请检查网络连接、数据格式或联系开发者")
+        exit(1)
