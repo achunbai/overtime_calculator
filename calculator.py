@@ -2,7 +2,7 @@
 # 适用于 深圳佛山桂林
 # 评价部分从之前的html中移植，如有冒犯 雨我无瓜
 # -*- coding: utf-8 -*-
-import csv, os, json, shutil, requests, argparse, platform
+import csv, os, json, shutil, requests, argparse, platform, traceback
 import time as t
 from bs4 import BeautifulSoup
 from typing import Dict, Set, Tuple, List, Optional
@@ -38,6 +38,14 @@ REFERER     = 'https://hr.quectel.com/portal/index'
 # 需要从页面获取的标题
 CLOCK_IN_DATA_TITLE             = '个人考勤查询'
 PROCESS_APPLICATION_DATA_TITLE  = '流程申请'
+
+# 默认班次与工作日加班起算时间
+DEFAULT_SHIFT_NAME = '深圳佛山桂林'
+DEFAULT_WORKDAY_OVERTIME_START = '19:00:00'
+ALT_WORKDAY_OVERTIME_START = '18:30:00'
+
+# 全局 debug 开关
+DEBUG = False
 
 
 # 本地文件操作
@@ -276,14 +284,20 @@ def get_user_variable_online(user_cookie, title):
     response = session.get(url)
 
     if response.status_code != 200:
+        if DEBUG:
+            print(f"[DEBUG] get_user_variable_online 响应状态码: {response.status_code}")
+            print(f"[DEBUG] get_user_variable_online 响应内容: {response.text[:2000]}")
         raise ValueError(f"请求失败: {response.status_code}")
 
     soup = BeautifulSoup(response.text, 'html.parser')
     link = soup.find('a', {'title': title})
 
     if link is None:
-        print(f"response = {response.text}")
-        print(f"link = {link}")
+        if DEBUG:
+            print(f"[DEBUG] get_user_variable_online 响应内容: {response.text[:2000]}")
+        else:
+            print(f"response = {response.text}")
+            print(f"link = {link}")
         raise ValueError(f"未找到标题为 '{title}' 的链接")
     
     href = link['href']
@@ -323,7 +337,11 @@ def get_clock_in_data(user_variable, user_cookie, target_month, target_year):
         'Content-Type': 'application/json'
     }
     response = requests.request("POST", url, headers=headers, data=payload)
-    
+
+    if DEBUG:
+        print(f"[DEBUG] get_clock_in_data 响应状态码: {response.status_code}")
+        print(f"[DEBUG] get_clock_in_data 响应内容: {response.text[:2000]}")
+
     return response.json()
 
 def get_attendance_data(user_variable, user_cookie, target_month, target_year):
@@ -359,7 +377,11 @@ def get_attendance_data(user_variable, user_cookie, target_month, target_year):
         'Content-Type': 'application/json'
     }
     response = requests.request("POST", url, headers=headers, data=payload)
-    
+
+    if DEBUG:
+        print(f"[DEBUG] get_attendance_data 响应状态码: {response.status_code}")
+        print(f"[DEBUG] get_attendance_data 响应内容: {response.text[:2000]}")
+
     return response.json()
 
 def get_process_application_data(user_variable, user_cookie):
@@ -424,7 +446,11 @@ def get_process_application_data(user_variable, user_cookie):
         'Content-Type': 'application/json'
     }
     response = requests.request("POST", url, headers=headers, data=payload)
-    
+
+    if DEBUG:
+        print(f"[DEBUG] get_process_application_data 响应状态码: {response.status_code}")
+        print(f"[DEBUG] get_process_application_data 响应内容: {response.text[:2000]}")
+
     return response.json()
 
 def get_delay_deduction_data(auth_key, user_cookie):
@@ -460,7 +486,11 @@ def get_delay_deduction_data(auth_key, user_cookie):
         'Content-Type': 'application/json'
     }
     response = requests.request("POST", url, headers=headers, data=payload)
-    
+
+    if DEBUG:
+        print(f"[DEBUG] get_delay_deduction_data 响应状态码: {response.status_code}")
+        print(f"[DEBUG] get_delay_deduction_data 响应内容: {response.text[:2000]}")
+
     return response.json()
 
 
@@ -703,7 +733,7 @@ def parse_process_application_data(leave_data: List[Dict], user_cookie: str) -> 
 
     return annual_leave, personal_leave, delay_deduction  # 返回年假、事假和延时工时扣减的字典
 
-def parse_attendance_data(attendance_json: str) -> Tuple[Dict[str, List[int]], int, int]:
+def parse_attendance_data(attendance_json: str) -> Tuple[Dict[str, List[int]], int, int, Dict[str, str]]:
     """
     解析个人考勤信息的JSON数据，提取每日的迟到分钟数、当月累计的迟到次数和当月累计的迟到分钟数。
 
@@ -714,6 +744,7 @@ def parse_attendance_data(attendance_json: str) -> Tuple[Dict[str, List[int]], i
         - daily_late_minutes：每日的迟到分钟数字典，键为日期，值为迟到分钟数列表。
         - total_late_count：当月累计的迟到次数。
         - total_late_minutes：当月累计的迟到分钟数。
+        - daily_shift_map：每日班次信息，键为日期，值为班次名称（SHIFT）。
     """
     # 解析JSON数据
     # 如果传入的是列表，直接使用；如果是字符串，解析为列表
@@ -724,6 +755,7 @@ def parse_attendance_data(attendance_json: str) -> Tuple[Dict[str, List[int]], i
     
     # 初始化结果变量
     daily_late_minutes = {}
+    daily_shift_map = {}
     total_late_count = 0  # 默认值改为0
     total_late_minutes = 0  # 默认值改为0
     
@@ -732,11 +764,14 @@ def parse_attendance_data(attendance_json: str) -> Tuple[Dict[str, List[int]], i
         date_str = record.get("TERM", "")
         late_minutes_str = record.get("LTRM_1", "0")
         late_minutes = int(late_minutes_str) if late_minutes_str.isdigit() else 0
+        shift_name = str(record.get("SHIFT", "")).strip()
         
         if date_str:
             if date_str not in daily_late_minutes:
                 daily_late_minutes[date_str] = []
             daily_late_minutes[date_str].append(late_minutes)
+            if shift_name and date_str not in daily_shift_map:
+                daily_shift_map[date_str] = shift_name
         
         # 提取当月累计的迟到次数和迟到分钟数（只需要提取一次）
         if total_late_count == 0:  # 只在第一次时设置
@@ -744,7 +779,7 @@ def parse_attendance_data(attendance_json: str) -> Tuple[Dict[str, List[int]], i
         if total_late_minutes == 0:  # 只在第一次时设置
             total_late_minutes = int(record.get("LATEMIN", 0))
 
-    return daily_late_minutes, total_late_count, total_late_minutes
+    return daily_late_minutes, total_late_count, total_late_minutes, daily_shift_map
 
 def count_weekends(year: int, month: int, holidays: list, workdays: set) -> int:
     """
@@ -786,7 +821,7 @@ def pay_rate_cal(day_type: str) -> str:
     # 工作日加班费20块/小时,周末30,节假日60
     return 20 if day_type == "工作日" else 30 if day_type == "周末" or day_type == "节假日(周末)" else 60 if day_type == "节假日" else 0
 
-def overtime_cal(first_check_time: str, last_check_time: str, day_type: str) -> float:
+def overtime_cal(first_check_time: str, last_check_time: str, day_type: str, shift_name: Optional[str] = None) -> float:
     """
     计算加班时长。
 
@@ -794,6 +829,7 @@ def overtime_cal(first_check_time: str, last_check_time: str, day_type: str) -> 
         first_check_time (str): 第一次打卡时间，格式为 'HH:MM:SS'。
         last_check_time (str): 最后一次打卡时间，格式为 'HH:MM:SS'。
         day_type (str): 日期类型，可以是 "工作日", "周末", "节假日(周末)" 或 "节假日"。
+        shift_name (Optional[str]): 当天班次名称（SHIFT）。
 
     返回值:
         float: 加班时长（小时）。
@@ -809,7 +845,11 @@ def overtime_cal(first_check_time: str, last_check_time: str, day_type: str) -> 
         
         if day_type == '工作日':
             last_dt = datetime.strptime(clean_last_time, '%H:%M:%S')
-            end_work_dt = datetime.strptime('19:00:00', '%H:%M:%S')
+            workday_overtime_start = DEFAULT_WORKDAY_OVERTIME_START
+            if shift_name and shift_name != DEFAULT_SHIFT_NAME:
+                # 非“深圳佛山桂林”班次：下午13:00-17:30，18:30开始算加班
+                workday_overtime_start = ALT_WORKDAY_OVERTIME_START
+            end_work_dt = datetime.strptime(workday_overtime_start, '%H:%M:%S')
             ret = (last_dt - end_work_dt).total_seconds()
             return ret / 3600 if ret > 0 else 0.0
         else:
@@ -1104,7 +1144,8 @@ def check_and_refresh_data(fetch_function, *args):
     """
     try:
         data = fetch_function(*args)
-        
+        new_cookie = args[1]  # 默认与传入的 cookie 相同
+
         # 检查返回的数据是否为字符串，如果是则可能包含错误信息
         if isinstance(data, str):
             if 'expired' in data or 'login' in data.lower() or 'unauthorized' in data.lower():
@@ -1113,14 +1154,14 @@ def check_and_refresh_data(fetch_function, *args):
                 # 查找浏览器参数，如果存在的话
                 if len(args) > 2 and isinstance(args[2], str) and args[2] in ['chrome', 'edge', 'auto']:
                     browser_arg = args[2]
-                    
-                cookie = fetch_cookie_via_browser(browser_arg)
+
+                new_cookie = fetch_cookie_via_browser(browser_arg)
                 print(f"获取到新的Cookie")
-                if cookie:
-                    save_cookie(cookie)
+                if new_cookie:
+                    save_cookie(new_cookie)
                     # 更新 args 中的 Cookie 参数
                     args = list(args)
-                    args[1] = cookie
+                    args[1] = new_cookie
                     args = tuple(args)
                     # 使用新的 Cookie 重新获取数据
                     data = fetch_function(*args)
@@ -1148,37 +1189,40 @@ def check_and_refresh_data(fetch_function, *args):
                     except Exception as e:
                         print(f"接口更新失败: {e}")
                         exit()
-        
+
         # 检查返回的数据是否为字典且包含错误信息
         elif isinstance(data, dict):
-            if data.get('code') == 'expired' or data.get('status') == 'unauthorized':
+            if data.get('code') == 'expired' or data.get('status') == 'unauthorized' or data.get('expired') is True:
                 print("Cookie已过期，正在重新获取...")
-                cookie = fetch_cookie_via_browser('auto')
-                if cookie:
-                    save_cookie(cookie)
+                new_cookie = fetch_cookie_via_browser('auto')
+                if new_cookie:
+                    save_cookie(new_cookie)
                     args = list(args)
-                    args[1] = cookie
+                    args[1] = new_cookie
                     args = tuple(args)
                     data = fetch_function(*args)
                 else:
                     print("Cookie获取失败，请重试")
                     exit()
-                    
-        return data
-        
+
+        return data, new_cookie
+
     except Exception as e:
         print(f"数据获取失败: {e}")
+        if DEBUG:
+            print(f"[DEBUG] 详细错误信息:")
+            traceback.print_exc()
         # 尝试重新获取Cookie
         print("尝试重新获取Cookie...")
-        cookie = fetch_cookie_via_browser('auto')
-        if cookie:
-            save_cookie(cookie)
+        new_cookie = fetch_cookie_via_browser('auto')
+        if new_cookie:
+            save_cookie(new_cookie)
             args = list(args)
-            args[1] = cookie
+            args[1] = new_cookie
             args = tuple(args)
             try:
                 data = fetch_function(*args)
-                return data
+                return data, new_cookie
             except Exception as retry_e:
                 print(f"重试后仍然失败: {retry_e}")
                 exit()
@@ -1197,8 +1241,14 @@ def main():
     parser.add_argument('--delete_sensitive_files', action='store_true', help='删除敏感文件')
     parser.add_argument('--clean-run', action='store_true', help='清除所有配置并重新运行')
     parser.add_argument('--broswer', choices=['chrome', 'edge', 'auto'], default='auto', help='指定使用的浏览器 (chrome, edge 或 auto), Safari浏览器不可用, 后续也不会添加Safari支持')
+    parser.add_argument('--debug', action='store_true', help='开启调试模式，打印详细的请求/响应信息和错误原因')
 
     args = parser.parse_args()
+
+    global DEBUG
+    if args.debug:
+        DEBUG = True
+        print("[DEBUG] 调试模式已开启")
 
     if args.delete_sensitive_files:
         if os.path.exists(COOKIES_FILE):
@@ -1334,14 +1384,16 @@ def main():
 
     # 获取打卡和流程申请数据
     print(f"检查并获取打卡数据...")
-    clock_in_data = check_and_refresh_data(get_clock_in_data, clock_in_api_endpoint, cookie, target_month, target_year)
+    clock_in_data, cookie = check_and_refresh_data(get_clock_in_data, clock_in_api_endpoint, cookie, target_month, target_year)
     print(f"检查并获取流程申请数据...")
-    process_application_data = check_and_refresh_data(get_process_application_data, process_application_api_endpoint, cookie)
+    process_application_data, cookie = check_and_refresh_data(get_process_application_data, process_application_api_endpoint, cookie)
     print(f"检查并获取出勤数据...")
-    attendance_data = check_and_refresh_data(get_attendance_data, clock_in_api_endpoint, cookie, target_month, target_year)
+    attendance_data, cookie = check_and_refresh_data(get_attendance_data, clock_in_api_endpoint, cookie, target_month, target_year)
 
     # 获取并计算加班信息
     if not clock_in_data or not isinstance(clock_in_data, list):
+        if DEBUG:
+            print(f"[DEBUG] clock_in_data 原始内容: {clock_in_data}")
         print("打卡数据为空或格式不正确，程序退出")
         exit()
         
@@ -1349,7 +1401,7 @@ def main():
     # 从流程申请中获取年假、事假以及延时工时扣减数据
     annual_leave, personal_leave, delay_deduction = parse_process_application_data(process_application_data, cookie)
     # 从出勤数据中获取迟到信息
-    daily_late_minutes, total_late_count, total_late_minutes = parse_attendance_data(attendance_data)
+    daily_late_minutes, total_late_count, total_late_minutes, daily_shift_map = parse_attendance_data(attendance_data)
     result = []			        # 这玩意存结果,列表里边是元组,元组可通过下标访问(python限定)
     group_by_date = {}	        # 按日期统计打卡时间
     late_minutes = 0.0          # 迟到分钟数
@@ -1389,7 +1441,8 @@ def main():
             ).time()
             day_type = get_day_type(date, holidays, workdays)
             rate = pay_rate_cal(day_type)
-            overtime = overtime_cal(first_check_time.strftime('%H:%M:%S'), last_check_time.strftime('%H:%M:%S'), day_type)
+            shift_name = daily_shift_map.get(date)
+            overtime = overtime_cal(first_check_time.strftime('%H:%M:%S'), last_check_time.strftime('%H:%M:%S'), day_type, shift_name)
         
             # 计算延时扣减总时间
             delay_deduction_time = 0.0
